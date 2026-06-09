@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import CryptoKit
 import Accelerate
 import UniformTypeIdentifiers
 import Playgrounds
@@ -251,6 +252,184 @@ struct Track: Identifiable, Equatable {
     }
 }
 
+struct LastFMConfiguration: Equatable {
+    var isEnabled: Bool
+    var apiKey: String
+    var sharedSecret: String
+    var sessionKey: String
+
+    static let empty = LastFMConfiguration(isEnabled: false, apiKey: "", sharedSecret: "", sessionKey: "")
+
+    var isReady: Bool {
+        isEnabled && !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        !sharedSecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        !sessionKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+}
+
+struct LastFMSettingsStore {
+    private enum Key {
+        static let isEnabled = "Ampintosh.lastfm.enabled"
+        static let apiKey = "Ampintosh.lastfm.apiKey"
+        static let sharedSecret = "Ampintosh.lastfm.sharedSecret"
+        static let sessionKey = "Ampintosh.lastfm.sessionKey"
+    }
+
+    static func load() -> LastFMConfiguration {
+        LastFMConfiguration(
+            isEnabled: UserDefaults.standard.bool(forKey: Key.isEnabled),
+            apiKey: UserDefaults.standard.string(forKey: Key.apiKey) ?? "",
+            sharedSecret: UserDefaults.standard.string(forKey: Key.sharedSecret) ?? "",
+            sessionKey: UserDefaults.standard.string(forKey: Key.sessionKey) ?? ""
+        )
+    }
+
+    static func save(_ configuration: LastFMConfiguration) {
+        UserDefaults.standard.set(configuration.isEnabled, forKey: Key.isEnabled)
+        UserDefaults.standard.set(configuration.apiKey.trimmingCharacters(in: .whitespacesAndNewlines), forKey: Key.apiKey)
+        UserDefaults.standard.set(configuration.sharedSecret.trimmingCharacters(in: .whitespacesAndNewlines), forKey: Key.sharedSecret)
+        UserDefaults.standard.set(configuration.sessionKey.trimmingCharacters(in: .whitespacesAndNewlines), forKey: Key.sessionKey)
+    }
+}
+
+enum LastFMStatus: Equatable {
+    case disabled
+    case needsSetup
+    case ready
+    case nowPlaying
+    case scrobbled
+    case failed(String)
+
+    var label: String {
+        switch self {
+        case .disabled: "LAST.FM OFF"
+        case .needsSetup: "LAST.FM SETUP"
+        case .ready: "LAST.FM READY"
+        case .nowPlaying: "NOW PLAYING"
+        case .scrobbled: "SCROBBLED"
+        case .failed: "LAST.FM ERROR"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .disabled: "Last.fm scrobbling is disabled"
+        case .needsSetup: "Add API key, shared secret, and session key"
+        case .ready: "Last.fm scrobbling is ready"
+        case .nowPlaying: "Current track sent to Last.fm"
+        case .scrobbled: "Track play sent to Last.fm"
+        case .failed(let message): message
+        }
+    }
+
+    var isActive: Bool {
+        switch self {
+        case .ready, .nowPlaying, .scrobbled:
+            true
+        case .disabled, .needsSetup, .failed:
+            false
+        }
+    }
+}
+
+struct LastFMClient {
+    private let configuration: LastFMConfiguration
+    private let endpoint = URL(string: "https://ws.audioscrobbler.com/2.0/")!
+
+    init(configuration: LastFMConfiguration) {
+        self.configuration = configuration
+    }
+
+    func updateNowPlaying(track: Track) async throws {
+        var parameters = baseParameters(method: "track.updateNowPlaying", track: track)
+        parameters["duration"] = String(Int(track.duration.rounded()))
+        try await send(parameters: parameters)
+    }
+
+    func scrobble(track: Track, startedAt date: Date) async throws {
+        var parameters = baseParameters(method: "track.scrobble", track: track)
+        parameters["timestamp"] = String(Int(date.timeIntervalSince1970))
+        parameters["duration"] = String(Int(track.duration.rounded()))
+        try await send(parameters: parameters)
+    }
+
+    private func baseParameters(method: String, track: Track) -> [String: String] {
+        var parameters = [
+            "method": method,
+            "api_key": configuration.apiKey.trimmingCharacters(in: .whitespacesAndNewlines),
+            "sk": configuration.sessionKey.trimmingCharacters(in: .whitespacesAndNewlines),
+            "track": track.title,
+            "artist": track.artist?.isEmpty == false ? track.artist! : "Unknown Artist"
+        ]
+
+        if let album = track.album, !album.isEmpty {
+            parameters["album"] = album
+        }
+
+        return parameters
+    }
+
+    private func send(parameters: [String: String]) async throws {
+        var signedParameters = parameters
+        signedParameters["api_sig"] = signature(for: parameters)
+        signedParameters["format"] = "json"
+
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        request.httpBody = formEncoded(signedParameters).data(using: .utf8)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) else {
+            throw LastFMError.transport
+        }
+
+        if let apiResponse = try? JSONDecoder().decode(LastFMAPIResponse.self, from: data),
+           apiResponse.error != nil {
+            throw LastFMError.api(apiResponse.message ?? "Last.fm rejected the request")
+        }
+    }
+
+    private func signature(for parameters: [String: String]) -> String {
+        let base = parameters
+            .sorted { $0.key < $1.key }
+            .map { $0.key + $0.value }
+            .joined() + configuration.sharedSecret.trimmingCharacters(in: .whitespacesAndNewlines)
+        let digest = Insecure.MD5.hash(data: Data(base.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func formEncoded(_ parameters: [String: String]) -> String {
+        parameters
+            .sorted { $0.key < $1.key }
+            .map { key, value in "\(Self.escape(key))=\(Self.escape(value))" }
+            .joined(separator: "&")
+    }
+
+    private static func escape(_ string: String) -> String {
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: ":#[]@!$&'()*+,;=")
+        return string.addingPercentEncoding(withAllowedCharacters: allowed) ?? string
+    }
+}
+
+struct LastFMAPIResponse: Decodable {
+    let error: Int?
+    let message: String?
+}
+
+enum LastFMError: LocalizedError {
+    case transport
+    case api(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .transport: "Last.fm request failed"
+        case .api(let message): message
+        }
+    }
+}
+
 /// Real-time audio analyzer. Runs an FFT on the live output tap to produce
 /// genuine per-band frequency magnitudes, plus time-domain RMS, peak, and a
 /// downsampled waveform. All heavy buffers are pre-allocated; the audio render
@@ -427,6 +606,7 @@ final class AudioAnalyzer {
     var peak: Double = 0
     /// Downsampled time-domain waveform (-1...1) for oscilloscope visualizers.
     var waveform: [Double] = Array(repeating: 0, count: 168)
+    var lastFMStatus: LastFMStatus = .disabled
 
     // Engine graph: player -> EQ (gain >100% headroom) -> mainMixer -> output.
     private let engine = AVAudioEngine()
@@ -444,6 +624,12 @@ final class AudioAnalyzer {
     private var displayTimer: Timer?
     private var metadataRefreshTask: Task<Void, Never>?
     private var securityScopedURLs: [URL] = []
+    private var lastFMConfiguration = LastFMConfiguration.empty
+    private var lastFMClient: LastFMClient?
+    private var lastFMTask: Task<Void, Never>?
+    private var playbackStartDate: Date?
+    private var nowPlayingTrackID: Track.ID?
+    private var scrobbledTrackID: Track.ID?
 
     // Convenience band energies, expressed as fractions of the spectrum so they
     // stay correct regardless of band count.
@@ -488,6 +674,12 @@ final class AudioAnalyzer {
         return min(max(currentTime / currentDuration, 0), 1)
     }
 
+    func updateLastFMConfiguration(_ configuration: LastFMConfiguration) {
+        lastFMConfiguration = configuration
+        lastFMClient = configuration.isReady ? LastFMClient(configuration: configuration) : nil
+        lastFMStatus = configuration.isEnabled ? (configuration.isReady ? .ready : .needsSetup) : .disabled
+    }
+
     func addFiles(_ urls: [URL], playlistMediaFolder: URL? = nil) async {
         var importedTracks: [Track] = []
 
@@ -530,6 +722,9 @@ final class AudioAnalyzer {
     func load(_ track: Track, autoPlay: Bool) -> Bool {
         selectedTrackID = track.id
         currentTime = 0
+        playbackStartDate = nil
+        nowPlayingTrackID = nil
+        scrobbledTrackID = nil
 
         do {
             let file = try AVAudioFile(forReading: track.url)
@@ -602,6 +797,7 @@ final class AudioAnalyzer {
         }
         playerNode.play()
         isPlaying = true
+        beginLastFMPlaybackIfNeeded()
         startDisplayTimer()
         return true
     }
@@ -748,6 +944,75 @@ final class AudioAnalyzer {
         isPlaying = false
     }
 
+    private func beginLastFMPlaybackIfNeeded() {
+        guard let track = selectedTrack else { return }
+        if playbackStartDate == nil || nowPlayingTrackID != track.id {
+            playbackStartDate = Date()
+        }
+        sendNowPlayingIfNeeded(for: track)
+    }
+
+    private func sendNowPlayingIfNeeded(for track: Track) {
+        guard nowPlayingTrackID != track.id else { return }
+        guard track.artist?.isEmpty == false else {
+            lastFMStatus = lastFMConfiguration.isEnabled ? .needsSetup : .disabled
+            return
+        }
+        guard let lastFMClient else {
+            lastFMStatus = lastFMConfiguration.isEnabled ? .needsSetup : .disabled
+            return
+        }
+
+        nowPlayingTrackID = track.id
+        lastFMTask?.cancel()
+        lastFMTask = Task { [weak self] in
+            do {
+                try await lastFMClient.updateNowPlaying(track: track)
+                await MainActor.run {
+                    guard let self, self.selectedTrackID == track.id else { return }
+                    self.lastFMStatus = .nowPlaying
+                }
+            } catch {
+                await MainActor.run {
+                    guard let self, self.selectedTrackID == track.id else { return }
+                    self.lastFMStatus = .failed(error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    private func scrobbleIfNeeded() {
+        guard let track = selectedTrack,
+              scrobbledTrackID != track.id,
+              track.duration > 30,
+              track.artist?.isEmpty == false,
+              let playbackStartDate,
+              let lastFMClient else {
+            return
+        }
+
+        let threshold = min(track.duration / 2, 240)
+        guard currentTime >= threshold else { return }
+
+        scrobbledTrackID = track.id
+        lastFMTask?.cancel()
+        lastFMTask = Task { [weak self] in
+            do {
+                try await lastFMClient.scrobble(track: track, startedAt: playbackStartDate)
+                await MainActor.run {
+                    guard let self, self.selectedTrackID == track.id else { return }
+                    self.lastFMStatus = .scrobbled
+                }
+            } catch {
+                await MainActor.run {
+                    guard let self, self.selectedTrackID == track.id else { return }
+                    self.scrobbledTrackID = nil
+                    self.lastFMStatus = .failed(error.localizedDescription)
+                }
+            }
+        }
+    }
+
     private func nodeElapsedSeconds() -> Double? {
         guard let nodeTime = playerNode.lastRenderTime,
               let playerTime = playerNode.playerTime(forNodeTime: nodeTime),
@@ -793,6 +1058,8 @@ final class AudioAnalyzer {
                     waveform[i] = waveform[i] * 0.4 + Double(snap.wave[i]) * 0.6
                 }
             }
+
+            scrobbleIfNeeded()
 
             if currentDuration > 0, currentTime >= currentDuration - 0.08 {
                 handlePlaybackEnded()
@@ -1320,6 +1587,8 @@ struct ContentView: View {
     @State private var outputDevice = AudioOutputDevice.current()
     @State private var rightPanelWidth: CGFloat = 430
     @State private var visualizerHeight: CGFloat = 150
+    @State private var lastFMConfiguration = LastFMSettingsStore.load()
+    @State private var isShowingLastFMSettings = false
 
     private let supportedTypes = [
         UTType.audio,
@@ -1348,7 +1617,12 @@ struct ContentView: View {
 
             GlassEffectContainer(spacing: 16) {
                 VStack(spacing: 10) {
-                    PlayerHeader(selectedSkin: $selectedSkin, outputDevice: outputDevice)
+                    PlayerHeader(
+                        selectedSkin: $selectedSkin,
+                        outputDevice: outputDevice,
+                        lastFMStatus: player.lastFMStatus,
+                        onConfigureLastFM: { isShowingLastFMSettings = true }
+                    )
 
                     HStack(alignment: .top, spacing: 10) {
                         VStack(spacing: 10) {
@@ -1408,7 +1682,16 @@ struct ContentView: View {
         .focusedSceneValue(\.clearPlaylist) {
             player.clearPlaylist()
         }
+        .sheet(isPresented: $isShowingLastFMSettings) {
+            LastFMSettingsView(configuration: $lastFMConfiguration)
+                .frame(width: 420)
+        }
+        .onChange(of: lastFMConfiguration) { _, newValue in
+            LastFMSettingsStore.save(newValue)
+            player.updateLastFMConfiguration(newValue)
+        }
         .task {
+            player.updateLastFMConfiguration(lastFMConfiguration)
             outputDevice = AudioOutputDevice.current()
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(2))
@@ -1442,6 +1725,8 @@ struct ContentView: View {
 struct PlayerHeader: View {
     @Binding var selectedSkin: AmpintoshSkin
     let outputDevice: AudioOutputDevice
+    let lastFMStatus: LastFMStatus
+    let onConfigureLastFM: () -> Void
     @Environment(\.ampintoshSkin) private var skin
 
     var body: some View {
@@ -1467,6 +1752,14 @@ struct PlayerHeader: View {
             Spacer()
 
             OutputDeviceIndicator(device: outputDevice)
+
+            Button {
+                onConfigureLastFM()
+            } label: {
+                Label(lastFMStatus.label, systemImage: "music.note.list")
+            }
+            .buttonStyle(LastFMStatusButtonStyle(isActive: lastFMStatus.isActive))
+            .help(lastFMStatus.detail)
 
             Picker("Skin", selection: $selectedSkin) {
                 ForEach(AmpintoshSkin.allCases) { skin in
@@ -1517,6 +1810,87 @@ struct OutputDeviceIndicator: View {
         .overlay(RoundedRectangle(cornerRadius: 6).stroke(.white.opacity(0.16), lineWidth: 1))
         .glassEffect(.regular.tint(skin.tertiary.opacity(0.12)).interactive(), in: .rect(cornerRadius: 6))
         .help("Current output device: \(device.name)")
+    }
+}
+
+struct LastFMSettingsView: View {
+    @Binding var configuration: LastFMConfiguration
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.ampintoshSkin) private var skin
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("LAST.FM")
+                        .font(.system(size: 18, weight: .black, design: .monospaced))
+                    Text("Scrobble local playback")
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(skin.mutedText)
+                }
+
+                Spacer()
+
+                Toggle("Enabled", isOn: $configuration.isEnabled)
+                    .toggleStyle(.switch)
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                CredentialField(label: "API KEY", text: $configuration.apiKey, isSecret: false)
+                CredentialField(label: "SHARED SECRET", text: $configuration.sharedSecret, isSecret: true)
+                CredentialField(label: "SESSION KEY", text: $configuration.sessionKey, isSecret: true)
+            }
+
+            Text("Uses Last.fm's authenticated scrobbling API. Ampintosh sends Now Playing at playback start and scrobbles after half the track or 4 minutes.")
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundStyle(skin.mutedText)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack {
+                Label(configuration.isReady ? "READY" : "NEEDS SETUP", systemImage: configuration.isReady ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                    .font(.system(size: 11, weight: .black, design: .monospaced))
+                    .foregroundStyle(configuration.isReady ? skin.primary : skin.secondary)
+
+                Spacer()
+
+                Button("Done") {
+                    dismiss()
+                }
+                .buttonStyle(SmallCommandButtonStyle())
+            }
+        }
+        .padding(18)
+        .background(skin.panel.opacity(0.96))
+        .environment(\.ampintoshSkin, skin)
+    }
+}
+
+struct CredentialField: View {
+    let label: String
+    @Binding var text: String
+    var isSecret: Bool
+    @Environment(\.ampintoshSkin) private var skin
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(label)
+                .font(.system(size: 10, weight: .black, design: .monospaced))
+                .foregroundStyle(skin.mutedText)
+
+            Group {
+                if isSecret {
+                    SecureField(label, text: $text)
+                } else {
+                    TextField(label, text: $text)
+                }
+            }
+            .textFieldStyle(.plain)
+            .font(.system(size: 12, weight: .semibold, design: .monospaced))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(skin.display.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(.white.opacity(0.16), lineWidth: 1))
+        }
     }
 }
 
@@ -2677,6 +3051,27 @@ struct ChipButtonStyle: ButtonStyle {
             .background(isActive ? skin.primary.opacity(0.82) : skin.panel.opacity(0.45), in: RoundedRectangle(cornerRadius: 5))
             .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.white.opacity(0.18), lineWidth: 1))
             .glassEffect(.regular.tint((isActive ? skin.primary : skin.tertiary).opacity(0.16)).interactive(), in: .rect(cornerRadius: 5))
+            .opacity(configuration.isPressed ? 0.75 : 1)
+    }
+}
+
+struct LastFMStatusButtonStyle: ButtonStyle {
+    let isActive: Bool
+    @Environment(\.ampintoshSkin) private var skin
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 9, weight: .black, design: .monospaced))
+            .foregroundStyle(isActive ? skin.display : skin.text)
+            .labelStyle(.titleAndIcon)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(
+                isActive ? skin.primary.opacity(0.82) : skin.panel.opacity(0.45),
+                in: RoundedRectangle(cornerRadius: 6)
+            )
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white.opacity(0.18), lineWidth: 1))
+            .glassEffect(.regular.tint((isActive ? skin.primary : skin.tertiary).opacity(0.14)).interactive(), in: .rect(cornerRadius: 6))
             .opacity(configuration.isPressed ? 0.75 : 1)
     }
 }
