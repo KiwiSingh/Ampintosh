@@ -37,6 +37,9 @@ Ampintosh is a macOS music player that blends compact Winamp-style controls with
 
 Open the project in Xcode and build the `Ampintosh` target. The debug app bundle is produced by Xcode in DerivedData, and this workspace also uses a local `Build/Ampintosh.app` copy for easy Finder testing.
 
+## Nintendo Switch version
+An experimental Nintendo Switch homebrew version can be found on the [Releases](https://github.com/KiwiSingh/Ampintosh/releases) page. It has very basic functionality compared to something like NXMilk, and is only built as a proof-of-concept for now. Doesn't fully load all tracks from a directory, autoplays music for now. Tested on latest Atmosphere OS with latest Hekate. Go grab it if you want to test it out I guess...
+
 ## Notes
 
 Technical metadata is read through AVFoundation, so availability depends on what macOS can decode and what each file exposes in its container metadata.
