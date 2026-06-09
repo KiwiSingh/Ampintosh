@@ -29,6 +29,10 @@ Ampintosh is a macOS music player that blends compact Winamp-style controls with
   - Space Cowboy
   - Music Glass
 
+## Screenshots
+
+![Ampintosh main window](AmpintoshSS.png)
+
 ## Building
 
 Open the project in Xcode and build the `Ampintosh` target. The debug app bundle is produced by Xcode in DerivedData, and this workspace also uses a local `Build/Ampintosh.app` copy for easy Finder testing.
