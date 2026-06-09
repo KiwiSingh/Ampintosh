@@ -45,8 +45,8 @@ INCLUDES	:=	include
 ROMFS	:=	romfs
 
 APP_TITLE	:=	Ampintosh
-APP_AUTHOR	:=	Kiwi
-APP_VERSION	:=	1.0.0
+APP_AUTHOR	:=	Kiwi Singh
+APP_VERSION	:=	1.5.6
 ICON		:=	Ampintosh.jpg
 
 #---------------------------------------------------------------------------------
@@ -68,20 +68,47 @@ FEATURE_CFLAGS	:=
 FEATURE_LIBS	:=
 
 ifeq ($(USB),1)
+	USBHSFS_HEADER := $(DEVKITPRO)/portlibs/switch/include/usbhsfs.h
+	USBHSFS_LIB    := $(DEVKITPRO)/portlibs/switch/lib/libusbhsfs.a
+ifeq ($(wildcard $(USBHSFS_HEADER)),)
+$(error USB=1 requires libusbhsfs, but $(USBHSFS_HEADER) was not found. Run ./install.sh --usb, or install DarkMatterCore/libusbhsfs with: make BUILD_TYPE=ISC install)
+endif
+ifeq ($(wildcard $(USBHSFS_LIB)),)
+$(error USB=1 requires libusbhsfs, but $(USBHSFS_LIB) was not found. Run ./install.sh --usb, or install DarkMatterCore/libusbhsfs with: make BUILD_TYPE=ISC install)
+endif
 	FEATURE_DEFINES	+= -DAMPINTOSH_USB
 	FEATURE_LIBS	+= -lusbhsfs
+# libusbhsfs ISC builds need no extra filesystem libs. If you installed
+# the GPL build instead, pass USB_BUILD_TYPE=GPL so NTFS/ext deps are linked.
+ifeq ($(USB_BUILD_TYPE),GPL)
+	FEATURE_LIBS	+= -lntfs-3g -llwext4
+endif
 endif
 
 ifeq ($(NET),1)
 	FEATURE_DEFINES	+= -DAMPINTOSH_NET
 	FEATURE_CFLAGS	+= `$(PKGCONF) --cflags libcurl`
 	FEATURE_NET_LIBS := `$(PKGCONF) --libs --static libcurl`
+
+	# Optional remote directory browsers. If these portlibs are present,
+	# Ampintosh enables real NXMP-style SMB/SFTP folder browsing. If not,
+	# stream_url/direct network file playback still builds through libcurl.
+ifeq ($(shell $(PKGCONF) --exists libssh2 2>/dev/null && echo yes),yes)
+	FEATURE_DEFINES	+= -DAMPINTOSH_SFTP
+	FEATURE_CFLAGS	+= `$(PKGCONF) --cflags libssh2`
+	FEATURE_NET_LIBS += `$(PKGCONF) --libs --static libssh2`
+endif
+ifeq ($(shell $(PKGCONF) --exists libsmb2 2>/dev/null && echo yes),yes)
+	FEATURE_DEFINES	+= -DAMPINTOSH_SMB
+	FEATURE_CFLAGS	+= `$(PKGCONF) --cflags libsmb2`
+	FEATURE_NET_LIBS += `$(PKGCONF) --libs --static libsmb2`
+endif
 endif
 
 CFLAGS	:=	-g -Wall -O2 -ffunction-sections \
 			$(ARCH) $(DEFINES) $(FEATURE_DEFINES)
 
-CFLAGS	+=	-D__SWITCH__ $(INCLUDE) `$(PKGCONF) --cflags SDL2_ttf SDL2` $(FEATURE_CFLAGS)
+CFLAGS	+=	-D__SWITCH__ $(INCLUDE) `$(PKGCONF) --cflags SDL2_image SDL2_ttf SDL2` $(FEATURE_CFLAGS)
 
 CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++17
 
@@ -90,7 +117,7 @@ LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*
 
 # usbhsfs is listed before the SDL/pkg-config chain so it precedes -lnx;
 # curl's static deps come after. switch.specs appends -lnx last to catch all.
-LIBS	:=	$(FEATURE_LIBS) `$(PKGCONF) --libs --static SDL2_ttf SDL2` $(FEATURE_NET_LIBS) -lm
+LIBS	:=	$(FEATURE_LIBS) `$(PKGCONF) --libs --static SDL2_image SDL2_ttf SDL2` $(FEATURE_NET_LIBS) -lm
 
 #---------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level containing
