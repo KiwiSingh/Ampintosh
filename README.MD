@@ -41,6 +41,9 @@ Open the project in Xcode and build the `Ampintosh` target. The debug app bundle
 ## Nintendo Switch version
 A Nintendo Switch version can be found on the [Releases](https://github.com/KiwiSingh/Ampintosh/releases) page. It includes solid features such as async streaming from SMB and SSH shares, USB support (untested!), Last.fm integration (via the `ampintosh.ini` file), audio visualizers, and skins. Go check it out now!
 
+![Ampintosh Switch screenshot](AmpintoshSwitch.jpg)
+
+
 ## Notes
 
 Technical metadata is read through AVFoundation, so availability depends on what macOS can decode and what each file exposes in its container metadata.
