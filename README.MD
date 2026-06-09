@@ -28,6 +28,7 @@ Ampintosh is a macOS music player that blends compact Winamp-style controls with
   - OctoHub
   - Space Cowboy
   - Music Glass
+- Last.fm integration
 
 ## Screenshots
 
@@ -38,7 +39,7 @@ Ampintosh is a macOS music player that blends compact Winamp-style controls with
 Open the project in Xcode and build the `Ampintosh` target. The debug app bundle is produced by Xcode in DerivedData, and this workspace also uses a local `Build/Ampintosh.app` copy for easy Finder testing.
 
 ## Nintendo Switch version
-An experimental Nintendo Switch homebrew version can be found on the [Releases](https://github.com/KiwiSingh/Ampintosh/releases) page. It has very basic functionality compared to something like NXMilk, and is only built as a proof-of-concept for now. Doesn't fully load all tracks from a directory, autoplays music for now. Tested on latest Atmosphere OS with latest Hekate. Go grab it if you want to test it out I guess...
+A Nintendo Switch version can be found on the [Releases](https://github.com/KiwiSingh/Ampintosh/releases) page. It includes solid features such as async streaming from SMB and SSH shares, USB support (untested!), Last.fm integration (via the `ampintosh.ini` file), audio visualizers, and skins. Go check it out now!
 
 ## Notes
 
